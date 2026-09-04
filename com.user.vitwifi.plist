@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/azimabdulla/.vitwifi/wifi_login.py</string>
+        <string>/usr/local/share/vitwifi/wifi_login.py</string>
         <string>login</string>
         <string>--quiet</string>
     </array>
@@ -17,8 +17,8 @@
         <string>/Library/Preferences/SystemConfiguration/preferences.plist</string>
     </array>
     <key>StandardOutPath</key>
-    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
+    <string>/tmp/vitwifi.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
+    <string>/tmp/vitwifi.log</string>
 </dict>
 </plist>
