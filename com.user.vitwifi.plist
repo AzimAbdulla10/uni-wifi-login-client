@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.vitwifi</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/azimabdulla/.vitwifi/wifi_login.py</string>
+        <string>login</string>
+        <string>--quiet</string>
+    </array>
+    <key>WatchPaths</key>
+    <array>
+        <string>/var/run/resolv.conf</string>
+        <string>/Library/Preferences/SystemConfiguration/preferences.plist</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
+</dict>
+</plist>

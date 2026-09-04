@@ -1,0 +1,18 @@
+# Environment & credentials
+.env
+*.env
+*.key
+.vit_wifi.env
+.last_notify
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
