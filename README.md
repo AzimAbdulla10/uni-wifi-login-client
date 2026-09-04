@@ -9,21 +9,6 @@ A lightweight macOS utility that automatically connects and authenticates to uni
 - **Secure**: Credentials are encrypted directly inside your macOS Keychain.
 - **Lightweight**: No background apps running, zero battery impact.
 
-## Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/AzimAbdulla10/uni-wifi-login-client.git
-cd uni-wifi-login-client
-```
-
-2. Run setup:
-```bash
-./setup.sh
-```
-
-Enter your university ID and password when prompted. That's it!
-
 ## Usage
 
 The tool works automatically whenever you connect to Wi-Fi.
