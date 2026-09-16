@@ -22,8 +22,13 @@ from pathlib import Path
 # --- Configuration Constants ---
 KEYCHAIN_SERVICE = "VIT-WiFi"
 DEFAULT_TARGET_SSIDS = ["G-VIT", "VIT", "VIT2.4G", "VIT5G", "G-VIT5G", "G-VIT2.4G"]
-PORTAL_LOGIN_URL = "http://phc.prontonetworks.com/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html"
-PORTAL_LOGOUT_URL = "http://phc.prontonetworks.com/cgi-bin/authlogout"
+
+# Gateways: Try domain name, and fallback directly to campus gateway IP (bypasses macOS DNS latency)
+PORTAL_ENDPOINTS = [
+    "http://phc.prontonetworks.com/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html",
+    "http://172.16.1.1/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html",
+]
+PORTAL_LOGOUT_URL = "http://172.16.1.1/cgi-bin/authlogout"
 CAPTIVE_TEST_URL = "http://captive.apple.com/hotspot-detect.html"
 
 ENV_CONFIG_FILE = Path.home() / ".vit_wifi.env"
@@ -108,7 +113,7 @@ def get_wifi_device():
 
 
 def get_current_ssid(device=None):
-    """Gets the currently connected Wi-Fi SSID (may be redacted on modern macOS without location perm)."""
+    """Gets the currently connected Wi-Fi SSID."""
     if not device:
         device = get_wifi_device()
     try:
@@ -123,22 +128,17 @@ def get_current_ssid(device=None):
 
 def is_campus_network(device="en0"):
     """
-    Robust detection for VIT campus network that does NOT rely on Location Services:
-    1. Checks if internal portal hostname 'phc.prontonetworks.com' resolves (returns 172.16.x.x).
+    Robust detection for VIT campus network:
+    1. Checks if Captive Network Assistant popup is open.
     2. Checks if local IP on Wi-Fi interface is within 172.16.x.x subnet.
-    3. Checks if SSID name matches (if visible).
-    4. Checks if Captive Network Assistant popup is open.
+    3. Checks if internal portal hostname 'phc.prontonetworks.com' resolves (172.16.x.x).
+    4. Checks if gateway IP 172.16.1.1 is reachable.
+    5. Checks if SSID name matches (if visible).
     """
     if is_cna_popup_open():
         return True, "Captive portal popup open"
 
-    try:
-        portal_ip = socket.gethostbyname("phc.prontonetworks.com")
-        if portal_ip.startswith("172.16.") or portal_ip.startswith("10."):
-            return True, f"Pronto Portal reachable ({portal_ip})"
-    except Exception:
-        pass
-
+    # Check 1: Wi-Fi interface IP address
     try:
         res = subprocess.run(["ipconfig", "getifaddr", device], capture_output=True, text=True)
         ip = res.stdout.strip()
@@ -147,6 +147,24 @@ def is_campus_network(device="en0"):
     except Exception:
         pass
 
+    # Check 2: DNS resolution of internal portal domain
+    try:
+        portal_ip = socket.gethostbyname("phc.prontonetworks.com")
+        if portal_ip.startswith("172.16.") or portal_ip.startswith("10."):
+            return True, f"Pronto Portal reachable ({portal_ip})"
+    except Exception:
+        pass
+
+    # Check 3: Check default gateway
+    try:
+        res = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
+        match = re.search(r"gateway:\s*(172\.16\.\S+)", res.stdout)
+        if match:
+            return True, f"Campus gateway ({match.group(1)})"
+    except Exception:
+        pass
+
+    # Check 4: SSID string if readable
     ssid = get_current_ssid(device)
     if ssid and any(target.lower() in ssid.lower() for target in DEFAULT_TARGET_SSIDS):
         return True, f"SSID: {ssid}"
@@ -375,7 +393,10 @@ def automate_cna_popup_ui(username, password):
 
 # --- Core Actions ---
 def send_http_post_login(username, password):
-    """Sends the HTTP POST request directly to the Pronto gateway."""
+    """
+    Sends the HTTP POST request directly to the Pronto gateway.
+    Tries both the hostname and direct gateway IP with retry backoff to survive DNS latency.
+    """
     post_data = urllib.parse.urlencode({
         "userId": username,
         "password": password,
@@ -386,6 +407,7 @@ def send_http_post_login(username, password):
     headers = {
         "User-Agent": USER_AGENT,
         "Content-Type": "application/x-www-form-urlencoded",
+        "Host": "phc.prontonetworks.com",
         "Origin": "http://phc.prontonetworks.com",
         "Referer": "http://phc.prontonetworks.com/cgi-bin/authlogin",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -393,23 +415,30 @@ def send_http_post_login(username, password):
     }
 
     ctx = ssl._create_unverified_context()
-    try:
-        req = urllib.request.Request(PORTAL_LOGIN_URL, data=post_data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=6, context=ctx) as response:
-            code = response.getcode()
-            log_message(f"HTTP login POST response: {code}")
-            return True
-    except Exception as e:
-        log_message(f"HTTP login POST notice: {e}")
-        return False
+
+    # Retry up to 3 times across endpoints
+    for attempt in range(1, 4):
+        for endpoint in PORTAL_ENDPOINTS:
+            try:
+                req = urllib.request.Request(endpoint, data=post_data, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=4, context=ctx) as response:
+                    code = response.getcode()
+                    log_message(f"HTTP login POST response ({endpoint}): {code}")
+                    return True
+            except Exception as e:
+                # Log only on final attempt to avoid noisy logs
+                if attempt == 3 and endpoint == PORTAL_ENDPOINTS[-1]:
+                    log_message(f"HTTP login POST notice (attempt {attempt}): {e}")
+                time.sleep(0.4)
+    return False
 
 
 def do_login(force=False, verbose=True):
     """
     Performs full automated login:
     1. Checks if connected to university network.
-    2. UI automation on CNA popup if present (clicks OKAY, fills credentials, clicks Login).
-    3. Parallel direct HTTP POST to Pronto Networks for instant authentication.
+    2. Parallel direct HTTP POST to Pronto Networks for instant authentication.
+    3. UI automation on CNA popup if present (clicks OKAY, fills credentials, clicks Login).
     4. Notifies user with 'VIT Wifi Connected'.
     """
     dev = get_wifi_device()
@@ -459,19 +488,20 @@ def do_login(force=False, verbose=True):
         log_message("CNA popup detected: Automating OKAY click and credential fill...")
         automate_cna_popup_ui(username, password)
 
-    http_thread.join(timeout=4)
-    time.sleep(1.0)
+    http_thread.join(timeout=5)
+    time.sleep(0.8)
 
     # Check internet connectivity
     if is_internet_accessible(timeout=4):
         msg = f"Successfully connected to internet as {username}!"
         log_message(f"SUCCESS: {msg}")
         notify_connected(username)
-        time.sleep(1.0)
+        time.sleep(0.5)
         dismiss_cna_popup()
         return True
     else:
-        time.sleep(1.5)
+        # Second check with a slight delay
+        time.sleep(1.0)
         if is_internet_accessible(timeout=4):
             log_message(f"SUCCESS: Connected to internet as {username}!")
             notify_connected(username)
@@ -488,7 +518,7 @@ def do_logout(verbose=True):
         log_message("Sending logout request to Pronto Networks...")
     ctx = ssl._create_unverified_context()
     try:
-        req = urllib.request.Request(PORTAL_LOGOUT_URL, headers={"User-Agent": USER_AGENT})
+        req = urllib.request.Request(PORTAL_LOGOUT_URL, headers={"User-Agent": USER_AGENT, "Host": "phc.prontonetworks.com"})
         with urllib.request.urlopen(req, timeout=5, context=ctx) as response:
             log_message(f"Logout response code: {response.getcode()}")
             send_notification("VIT Wi-Fi", "Logged out from campus network.")
