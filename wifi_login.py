@@ -23,8 +23,8 @@ from pathlib import Path
 KEYCHAIN_SERVICE = "VIT-WiFi"
 DEFAULT_TARGET_SSIDS = ["G-VIT", "VIT", "VIT2.4G", "VIT5G", "G-VIT5G", "G-VIT2.4G"]
 
-# Gateways: Try domain name, and fallback directly to campus gateway IP (bypasses macOS DNS latency)
-PORTAL_ENDPOINTS = [
+# Gateways: Candidate endpoints for authentication
+DEFAULT_PORTAL_ENDPOINTS = [
     "http://phc.prontonetworks.com/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html",
     "http://172.16.1.1/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html",
 ]
@@ -45,7 +45,7 @@ USER_AGENT = (
 def log_message(msg, print_to_stdout=True):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     formatted = f"[{timestamp}] {msg}"
-    if print_to_stdout:
+    if print_to_stdout and sys.stdout.isatty():
         print(formatted)
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -85,18 +85,101 @@ def notify_connected(username):
     send_notification("VIT Wifi Connected", f"Logged in as {username} • Internet Active")
 
 
+# --- CNA (Captive Network Assistant) Popup Management ---
 def is_cna_popup_open():
     """Checks if macOS Captive Network Assistant process is currently running."""
     res = subprocess.run(["pgrep", "-fl", "Captive Network Assistant"], capture_output=True, text=True)
     return res.returncode == 0
 
 
-def dismiss_cna_popup():
-    """Closes the macOS Captive Network Assistant popup if open."""
+def hide_cna_popup():
+    """Instantly hides the macOS Captive Network Assistant window so it is not visible on screen."""
+    apple_script = '''
+    tell application "System Events"
+        if exists (process "Captive Network Assistant") then
+            set visible of process "Captive Network Assistant" to false
+        end if
+    end tell
+    '''
     try:
-        subprocess.run(["killall", "Captive Network Assistant"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["osascript", "-e", apple_script], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def dismiss_cna_popup():
+    """Closes and terminates the macOS Captive Network Assistant popup using multiple methods."""
+    # Method 1: Clean AppleScript quit
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "Captive Network Assistant" to quit'],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    # Method 2: pkill
+    try:
+        subprocess.run(["pkill", "-f", "Captive Network Assistant"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    # Method 3: killall
+    try:
+        subprocess.run(["killall", "Captive Network Assistant"],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def watch_and_dismiss_cna(duration=3.0, interval=0.3):
+    """Watches in the background for any late-spawning CNA popups and terminates them."""
+    def _worker():
+        end_time = time.time() + duration
+        while time.time() < end_time:
+            if is_cna_popup_open():
+                hide_cna_popup()
+                dismiss_cna_popup()
+            time.sleep(interval)
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
+def is_cna_disabled_in_macos():
+    """Checks if macOS native Captive Network Assistant is disabled at the OS level."""
+    try:
+        res = subprocess.run(
+            ["defaults", "read", "/Library/Preferences/SystemConfiguration/com.apple.captive.control", "Active"],
+            capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            return res.stdout.strip() in ("0", "false", "False")
+    except Exception:
+        pass
+    return False
+
+
+def set_macos_cna_active(active=True):
+    """Configures macOS Captive Network Assistant setting (requires sudo)."""
+    val = "true" if active else "false"
+    cmd = [
+        "sudo", "defaults", "write",
+        "/Library/Preferences/SystemConfiguration/com.apple.captive.control",
+        "Active", "-boolean", val
+    ]
+    print(f"\nExecuting: {' '.join(cmd)}")
+    try:
+        res = subprocess.run(cmd)
+        if res.returncode == 0:
+            if not active:
+                print("✅ macOS Captive Portal popup has been permanently DISABLED!")
+                print("   macOS will no longer pop up the login sheet when joining campus Wi-Fi.\n")
+            else:
+                print("✅ macOS Captive Portal popup has been restored to default (Active).\n")
+            return True
+        else:
+            print("❌ Command failed. Make sure you entered your administrator password.\n")
+            return False
+    except Exception as e:
+        print(f"❌ Error: {e}\n")
+        return False
 
 
 # --- Network Detection Helpers ---
@@ -126,13 +209,36 @@ def get_current_ssid(device=None):
     return None
 
 
+def get_gateway_ip():
+    """Returns the current default IPv4 gateway IP if available."""
+    try:
+        res = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
+        match = re.search(r"gateway:\s*(\d+\.\d+\.\d+\.\d+)", res.stdout)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def get_portal_endpoints():
+    """Builds candidate login endpoints including dynamic campus gateway."""
+    endpoints = list(DEFAULT_PORTAL_ENDPOINTS)
+    gw = get_gateway_ip()
+    if gw and (gw.startswith("172.16.") or gw.startswith("172.")) and gw != "172.16.1.1":
+        gw_endpoint = f"http://{gw}/cgi-bin/authlogin?URI=http://captive.apple.com/hotspot-detect.html"
+        if gw_endpoint not in endpoints:
+            endpoints.append(gw_endpoint)
+    return endpoints
+
+
 def is_campus_network(device="en0"):
     """
     Robust detection for VIT campus network:
     1. Checks if Captive Network Assistant popup is open.
     2. Checks if local IP on Wi-Fi interface is within 172.16.x.x subnet.
-    3. Checks if internal portal hostname 'phc.prontonetworks.com' resolves (172.16.x.x).
-    4. Checks if gateway IP 172.16.1.1 is reachable.
+    3. Checks if internal portal hostname 'phc.prontonetworks.com' resolves.
+    4. Checks if campus gateway IP is reachable.
     5. Checks if SSID name matches (if visible).
     """
     if is_cna_popup_open():
@@ -156,13 +262,9 @@ def is_campus_network(device="en0"):
         pass
 
     # Check 3: Check default gateway
-    try:
-        res = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
-        match = re.search(r"gateway:\s*(172\.16\.\S+)", res.stdout)
-        if match:
-            return True, f"Campus gateway ({match.group(1)})"
-    except Exception:
-        pass
+    gw = get_gateway_ip()
+    if gw and (gw.startswith("172.16.") or gw.startswith("172.")):
+        return True, f"Campus gateway ({gw})"
 
     # Check 4: SSID string if readable
     ssid = get_current_ssid(device)
@@ -285,117 +387,11 @@ def prompt_for_credentials_interactively():
     return None, None
 
 
-# --- CNA UI Automation (AppleScript) ---
-def automate_cna_popup_ui(username, password):
-    """
-    Simulates clicking 'OKAY' on the CNA modal dialog,
-    filling the username & password, and clicking 'Login'.
-    """
-    safe_user = username.replace('\\', '\\\\').replace('"', '\\"')
-    safe_pass = password.replace('\\', '\\\\').replace('"', '\\"')
-
-    apple_script = f'''
-    tell application "System Events"
-        if exists (process "Captive Network Assistant") then
-            tell process "Captive Network Assistant"
-                set frontmost to true
-                delay 0.4
-                
-                -- Step 1: Click the "OKAY" button on the notice modal
-                set clickedOkay to false
-                try
-                    set allBtns to (every button of entire contents of window 1)
-                    repeat with aBtn in allBtns
-                        try
-                            set btnName to (name of aBtn) as text
-                            if btnName contains "OKAY" or btnName contains "Okay" or btnName contains "OK" then
-                                click aBtn
-                                set clickedOkay to true
-                                exit repeat
-                            end if
-                        end try
-                    end repeat
-                end try
-                
-                if not clickedOkay then
-                    key code 36
-                end if
-                
-                delay 0.6
-                
-                -- Step 2: Fill Username & Password
-                set filledFields to false
-                try
-                    set allTextFields to (every text field of entire contents of window 1)
-                    if (count of allTextFields) >= 1 then
-                        set value of item 1 of allTextFields to "{safe_user}"
-                        delay 0.2
-                        
-                        set allSecure to (every text field of entire contents of window 1 whose subrole is "AXSecureTextField")
-                        if (count of allSecure) >= 1 then
-                            set value of item 1 of allSecure to "{safe_pass}"
-                        else if (count of allTextFields) >= 2 then
-                            set value of item 2 of allTextFields to "{safe_pass}"
-                        end if
-                        set filledFields to true
-                    end if
-                end try
-                
-                -- Step 3: Click Login button
-                if filledFields then
-                    delay 0.3
-                    set clickedLogin to false
-                    try
-                        set allBtnsAfter to (every button of entire contents of window 1)
-                        repeat with aBtn in allBtnsAfter
-                            try
-                                set btnName to (name of aBtn) as text
-                                if btnName contains "Login" or btnName contains "Sign in" or btnName contains "Submit" then
-                                    click aBtn
-                                    set clickedLogin to true
-                                    exit repeat
-                                end if
-                            end try
-                        end repeat
-                    end try
-                    
-                    if not clickedLogin then
-                        key code 36
-                    end if
-                else
-                    delay 0.2
-                    keystroke tab
-                    delay 0.2
-                    keystroke "{safe_user}"
-                    delay 0.2
-                    keystroke tab
-                    delay 0.2
-                    keystroke "{safe_pass}"
-                    delay 0.2
-                    key code 36
-                end if
-            end tell
-        end if
-    end tell
-    '''
-    try:
-        res = subprocess.run(["osascript", "-e", apple_script], capture_output=True, text=True)
-        if res.returncode == 0:
-            log_message("CNA UI automation executed (OKAY clicked, credentials filled, Login pressed).")
-            return True
-        else:
-            log_message(f"AppleScript UI notice: {res.stderr.strip()}")
-            return False
-    except Exception as e:
-        log_message(f"AppleScript execution exception: {e}")
-        return False
-
-
-# --- Core Actions ---
+## --- Core Actions ---
 def send_http_post_login(username, password):
     """
     Sends the HTTP POST request directly to the Pronto gateway.
-    Tries both the hostname and direct gateway IP with retry backoff to survive DNS latency.
+    Tries hostname, direct gateway IP, and active default gateway with retry backoff.
     """
     post_data = urllib.parse.urlencode({
         "userId": username,
@@ -415,10 +411,11 @@ def send_http_post_login(username, password):
     }
 
     ctx = ssl._create_unverified_context()
+    endpoints = get_portal_endpoints()
 
-    # Retry up to 3 times across endpoints
+    # Retry up to 3 times across candidate endpoints
     for attempt in range(1, 4):
-        for endpoint in PORTAL_ENDPOINTS:
+        for endpoint in endpoints:
             try:
                 req = urllib.request.Request(endpoint, data=post_data, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=4, context=ctx) as response:
@@ -427,23 +424,40 @@ def send_http_post_login(username, password):
                     return True
             except Exception as e:
                 # Log only on final attempt to avoid noisy logs
-                if attempt == 3 and endpoint == PORTAL_ENDPOINTS[-1]:
+                if attempt == 3 and endpoint == endpoints[-1]:
                     log_message(f"HTTP login POST notice (attempt {attempt}): {e}")
-                time.sleep(0.4)
+                time.sleep(0.3)
     return False
 
 
 def do_login(force=False, verbose=True):
     """
     Performs full automated login:
-    1. Checks if connected to university network.
-    2. Parallel direct HTTP POST to Pronto Networks for instant authentication.
-    3. UI automation on CNA popup if present (clicks OKAY, fills credentials, clicks Login).
+    1. Waits for network readiness (DHCP IP / campus gateway).
+    2. Immediately hides any CNA popup so it does not distract the user.
+    3. Sends direct HTTP POST to Pronto Networks for instant authentication.
     4. Notifies user with 'VIT Wifi Connected'.
+    5. Dismisses CNA popup and monitors for late spawns.
     """
     dev = get_wifi_device()
-    on_campus, reason = is_campus_network(dev)
+
+    # Network readiness wait loop: when triggered on Wi-Fi connect, wait up to 8s for DHCP IP
+    on_campus = False
+    reason = "Checking network..."
+    max_wait = 1.0 if force else 8.0
+    start_wait = time.time()
+
+    while time.time() - start_wait < max_wait:
+        if is_cna_popup_open():
+            hide_cna_popup()
+        on_campus, reason = is_campus_network(dev)
+        if on_campus:
+            break
+        time.sleep(0.5)
+
     cna_open = is_cna_popup_open()
+    if cna_open:
+        hide_cna_popup()
 
     if verbose:
         log_message(f"Network Check: On Campus={on_campus} ({reason}) | CNA Popup={'Open' if cna_open else 'Closed'}")
@@ -470,7 +484,7 @@ def do_login(force=False, verbose=True):
     if not force and is_internet_accessible(timeout=2):
         if verbose:
             log_message("Internet connection is already active and working.")
-        if cna_open:
+        if is_cna_popup_open():
             dismiss_cna_popup()
         notify_connected(username)
         return True
@@ -478,38 +492,33 @@ def do_login(force=False, verbose=True):
     if verbose:
         log_message(f"Authenticating as '{username}' (source: {source})...")
 
-    # Run direct HTTP POST in parallel thread for fast gateway authentication
-    http_thread = threading.Thread(target=send_http_post_login, args=(username, password))
-    http_thread.daemon = True
-    http_thread.start()
+    # If CNA popup window is open, hide it immediately
+    if is_cna_popup_open():
+        hide_cna_popup()
 
-    # If CNA popup window is open, automate the UI actions (OKAY -> fill form -> Login)
-    if cna_open:
-        log_message("CNA popup detected: Automating OKAY click and credential fill...")
-        automate_cna_popup_ui(username, password)
+    # Run direct HTTP POST authentication
+    send_http_post_login(username, password)
 
-    http_thread.join(timeout=5)
-    time.sleep(0.8)
+    # Check internet connectivity (poll quickly up to 4 times)
+    connected = False
+    for _ in range(4):
+        if is_internet_accessible(timeout=2):
+            connected = True
+            break
+        time.sleep(0.5)
 
-    # Check internet connectivity
-    if is_internet_accessible(timeout=4):
+    if connected:
         msg = f"Successfully connected to internet as {username}!"
         log_message(f"SUCCESS: {msg}")
         notify_connected(username)
-        time.sleep(0.5)
         dismiss_cna_popup()
+        watch_and_dismiss_cna(duration=3.0, interval=0.3)
         return True
     else:
-        # Second check with a slight delay
-        time.sleep(1.0)
-        if is_internet_accessible(timeout=4):
-            log_message(f"SUCCESS: Connected to internet as {username}!")
-            notify_connected(username)
+        log_message("Notice: Checking connection status...")
+        if is_cna_popup_open():
             dismiss_cna_popup()
-            return True
-        else:
-            log_message("Notice: Checking connection status...")
-            return False
+        return False
 
 
 def do_logout(verbose=True):
@@ -535,15 +544,22 @@ def print_status():
     internet = is_internet_accessible(timeout=3)
     user, _, source = get_credentials()
     cna_running = is_cna_popup_open()
+    cna_disabled = is_cna_disabled_in_macos()
 
-    print("\n" + "=" * 56)
+    print("\n" + "=" * 58)
     print("             G-VIT Wi-Fi Automation Status")
-    print("=" * 56)
+    print("=" * 58)
     print(f"  Wi-Fi Interface  : {dev}")
     print(f"  Campus Network?  : {'✅ Yes (' + reason + ')' if on_campus else '❌ No'}")
     print(f"  Internet Access  : {'✅ Connected & Active' if internet else '❌ Blocked / Offline'}")
-    print(f"  CNA Popup Window : {'🟢 Open right now' if cna_running else '⚪ Not open (Internet working)'}")
-    
+    print(f"  CNA Popup Window : {'🟢 Open right now' if cna_running else '⚪ Not open'}")
+
+    if cna_disabled:
+        print("  macOS Popup State: ✅ Disabled (CNA popup suppressed at OS level)")
+    else:
+        print("  macOS Popup State: ⚠️  Active (macOS will show popup on connect)")
+        print("                     Run 'vit-wifi disable-popup' to turn it off!")
+
     if user:
         print(f"  Credentials      : Configured for '{user}' ({source})")
     else:
@@ -556,7 +572,7 @@ def print_status():
         print("  Auto-Trigger     : ⚪ Not installed")
 
     print(f"  Log File         : {LOG_FILE}")
-    print("=" * 56 + "\n")
+    print("=" * 58 + "\n")
 
 
 # --- Main Entrypoint ---
@@ -573,6 +589,9 @@ def main():
 
     subparsers.add_parser("status", help="Show current Wi-Fi, internet, and credential status")
 
+    subparsers.add_parser("disable-popup", help="Permanently disable macOS captive portal popup (requires sudo)")
+    subparsers.add_parser("enable-popup", help="Re-enable macOS captive portal popup")
+
     cred_parser = subparsers.add_parser("set-credentials", help="Save university credentials")
     cred_parser.add_argument("-u", "--username", help="Student / Staff ID")
     cred_parser.add_argument("-p", "--password", help="Wi-Fi portal password")
@@ -582,7 +601,7 @@ def main():
 
     if not args.command:
         print_status()
-        print("Usage: vit-wifi [login|logout|status|set-credentials]")
+        print("Usage: vit-wifi [login|logout|status|set-credentials|disable-popup|enable-popup]")
         return
 
     if args.command == "login":
@@ -595,6 +614,12 @@ def main():
 
     elif args.command == "status":
         print_status()
+
+    elif args.command == "disable-popup":
+        set_macos_cna_active(active=False)
+
+    elif args.command == "enable-popup":
+        set_macos_cna_active(active=True)
 
     elif args.command == "set-credentials":
         user = args.username
