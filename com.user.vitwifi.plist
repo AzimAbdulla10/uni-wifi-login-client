@@ -7,18 +7,16 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/usr/local/share/vitwifi/wifi_login.py</string>
-        <string>login</string>
-        <string>--quiet</string>
+        <string>/Users/azimabdulla/.vitwifi/wifi_login.py</string>
+        <string>watch</string>
     </array>
-    <key>WatchPaths</key>
-    <array>
-        <string>/var/run/resolv.conf</string>
-        <string>/Library/Preferences/SystemConfiguration/preferences.plist</string>
-    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/vitwifi.log</string>
+    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/vitwifi.log</string>
+    <string>/Users/azimabdulla/Library/Logs/vitwifi.log</string>
 </dict>
 </plist>

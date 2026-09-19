@@ -63,9 +63,9 @@ fi
 
 "$PYTHON_BIN" "$INSTALL_DIR/wifi_login.py" set-credentials -u "$USER_ID" -p "$USER_PASS" --storage "$STORAGE"
 
-# Step 3: Install LaunchAgent (Event-Driven on Wi-Fi connect)
+# Step 3: Install LaunchAgent (Active Zero-Popup Watcher)
 echo ""
-echo "Step 2: Install Background Service (Event-Driven)"
+echo "Step 2: Install Background Watcher Service (Zero-Popup Mode)"
 echo "-----------------------------------"
 mkdir -p "$HOME/Library/LaunchAgents"
 
@@ -80,14 +80,12 @@ cat << PLIST_EOF > "$TARGET_PLIST"
     <array>
         <string>$PYTHON_BIN</string>
         <string>$INSTALL_DIR/wifi_login.py</string>
-        <string>login</string>
-        <string>--quiet</string>
+        <string>watch</string>
     </array>
-    <key>WatchPaths</key>
-    <array>
-        <string>/var/run/resolv.conf</string>
-        <string>/Library/Preferences/SystemConfiguration/preferences.plist</string>
-    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>$HOME/Library/Logs/vitwifi.log</string>
     <key>StandardErrorPath</key>
@@ -99,34 +97,7 @@ PLIST_EOF
 # Reload via modern bootstrap
 launchctl bootout "gui/$USER_ID_NUM" "$TARGET_PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$USER_ID_NUM" "$TARGET_PLIST"
-echo "✅ Background Auto-Login installed (Event-driven: 0 background processes when idle)!"
-
-# Step 4: Configure CLI shortcut
-mkdir -p "$HOME/.local/bin"
-cat << 'BIN_EOF' > "$HOME/.local/bin/vit-wifi"
-#!/bin/bash
-exec /usr/bin/python3 "$HOME/.vitwifi/wifi_login.py" "${@:-login}"
-BIN_EOF
-chmod +x "$HOME/.local/bin/vit-wifi"
-
-# Step 5: Eliminate macOS Captive Portal Popup
-echo ""
-echo "Step 3: Eliminate Login Popup"
-echo "-----------------------------------"
-echo "By default, macOS pops up a browser window when connecting to campus Wi-Fi."
-echo "Disabling this allows seamless, silent auto-login in the background."
-read -p "Permanently disable macOS login popup? (requires sudo) [Y/n]: " DISABLE_POPUP_CHOICE
-
-if [[ "$DISABLE_POPUP_CHOICE" =~ ^[Nn]$ ]]; then
-    echo "Skipped. You can disable it anytime later with: vit-wifi disable-popup"
-else
-    echo "Configuring macOS..."
-    if sudo defaults write /Library/Preferences/SystemConfiguration/com.apple.captive.control Active -boolean false 2>/dev/null; then
-        echo "✅ macOS login popup permanently disabled!"
-    else
-        echo "⚠️  Could not disable popup automatically. Run 'vit-wifi disable-popup' anytime."
-    fi
-fi
+echo "✅ Background Watcher Daemon installed and active!"
 
 echo ""
 echo "=========================================================="
@@ -136,9 +107,8 @@ echo ""
 "$PYTHON_BIN" "$INSTALL_DIR/wifi_login.py" status
 
 echo "Next steps:"
-echo "• When you connect to campus Wi-Fi, it will automatically log in silently!"
+echo "• When you connect to 'G-VIT', it will automatically log in and notify you!"
 echo "• Test manually anytime: vit-wifi"
 echo "• Check status:          vit-wifi status"
-echo "• Turn popup off/on:     vit-wifi disable-popup / enable-popup"
 echo "• View activity log:     tail -f ~/Library/Logs/vitwifi.log"
 echo ""
