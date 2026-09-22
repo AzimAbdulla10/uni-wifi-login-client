@@ -380,8 +380,8 @@ def do_login(force=False, verbose=True):
     3. Sends direct gateway POST in < 0.1s.
     4. Confirms internet access & notifies user.
     """
-    # 1. Proactively suppress popup window immediately
-    stop_suppressor = start_popup_suppressor(duration=8)
+    # 1. Proactively suppress popup window immediately (duration needs to cover wake-from-sleep lag)
+    stop_suppressor = start_popup_suppressor(duration=45)
 
     dev = get_wifi_device()
     on_campus, reason = is_campus_network(dev)
@@ -419,7 +419,8 @@ def do_login(force=False, verbose=True):
         return True
 
     # 2. Wait for DHCP / network route to be fully established
-    ready, ip = wait_for_network_ready(dev, timeout=15)
+    # On wake from sleep, macOS can take 20-30s to establish the route.
+    ready, ip = wait_for_network_ready(dev, timeout=40)
     if not ready:
         log_message("Notice: Waiting for IP route/DNS to establish...")
 
