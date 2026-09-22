@@ -357,18 +357,16 @@ def send_http_post_login(username, password):
 
     ctx = ssl._create_unverified_context()
 
-    for attempt in range(1, 4):
-        for endpoint in PORTAL_ENDPOINTS:
-            try:
-                req = urllib.request.Request(endpoint, data=post_data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=3.5, context=ctx) as response:
-                    code = response.getcode()
-                    log_message(f"HTTP login POST response ({endpoint}): {code}")
-                    return True
-            except Exception as e:
-                if attempt == 3:
-                    log_message(f"HTTP POST notice ({endpoint}): {e}")
-                time.sleep(0.3)
+    for endpoint in PORTAL_ENDPOINTS:
+        try:
+            req = urllib.request.Request(endpoint, data=post_data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=2.0, context=ctx) as response:
+                code = response.getcode()
+                log_message(f"HTTP login POST response ({endpoint}): {code}")
+                return True
+        except Exception:
+            pass
+            
     return False
 
 
@@ -418,20 +416,25 @@ def do_login(force=False, verbose=True):
         notify_connected(username)
         return True
 
-    # 2. Wait for DHCP / network route to be fully established
-    # On wake from sleep, macOS can take 20-30s to establish the route.
-    ready, ip = wait_for_network_ready(dev, timeout=40)
-    if not ready:
-        log_message("Notice: Waiting for IP route/DNS to establish...")
-
+    # 2. Aggressively spam the login payload until it succeeds or times out.
+    # This bypasses all DNS hangs and route checks by just attempting the POST 
+    # until the network interface is capable of routing it.
     if verbose:
         log_message(f"Authenticating as '{username}' (source: {source})...")
 
-    # 3. Fire direct gateway authentication
-    login_ok = send_http_post_login(username, password)
-    time.sleep(0.5)
+    login_ok = False
+    start_time = time.time()
+    
+    while time.time() - start_time < 20:
+        if send_http_post_login(username, password):
+            login_ok = True
+            break
+        time.sleep(1.0)
+    
+    if not login_ok:
+        log_message("Warning: Could not reach login gateway after 20 seconds.")
 
-    # 4. Confirm internet connectivity
+    # 3. Confirm internet connectivity
     success = False
     for _ in range(3):
         dismiss_cna_popup()
