@@ -366,8 +366,8 @@ def send_http_post_login(username, password):
                     log_message(f"HTTP login POST response ({endpoint}): {code}")
                     return True
             except Exception as e:
-                if attempt == 3 and endpoint == PORTAL_ENDPOINTS[-1]:
-                    log_message(f"HTTP login POST notice (attempt {attempt}): {e}")
+                if attempt == 3:
+                    log_message(f"HTTP POST notice ({endpoint}): {e}")
                 time.sleep(0.3)
     return False
 
@@ -418,10 +418,10 @@ def do_login(force=False, verbose=True):
         notify_connected(username)
         return True
 
-    # 2. Wait for DHCP / network route to be fully established (up to 6s)
-    ready, ip = wait_for_network_ready(dev, timeout=6)
+    # 2. Wait for DHCP / network route to be fully established
+    ready, ip = wait_for_network_ready(dev, timeout=15)
     if not ready:
-        log_message("Notice: Waiting for IP route to establish...")
+        log_message("Notice: Waiting for IP route/DNS to establish...")
 
     if verbose:
         log_message(f"Authenticating as '{username}' (source: {source})...")
@@ -487,9 +487,6 @@ def run_watcher():
         try:
             dev = get_wifi_device()
             on_campus, _ = is_campus_network(dev)
-
-            if not on_campus:
-                consecutive_failures = 0
 
             # If we've failed too many times, back off and let the popup appear normally
             if consecutive_failures >= 2:
