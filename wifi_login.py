@@ -143,23 +143,33 @@ def get_current_ssid(device=None):
     return None
 
 
-def wait_for_network_ready(device="en0", timeout=8):
+def wait_for_network_ready(device="en0", timeout=12):
     """
-    Waits until DHCP has assigned an IP and default gateway route to the Wi-Fi interface.
-    Prevents '[Errno 51] Network is unreachable' by ensuring the link is fully routed.
+    Waits until DHCP has assigned an IP, default gateway route is up, and DNS resolves.
+    Prevents '[Errno 8]' on newer macOS versions where DNS lags behind route establishment.
     """
     start = time.time()
+    ip_ready = False
     while time.time() - start < timeout:
         try:
-            res = subprocess.run(["ipconfig", "getifaddr", device], capture_output=True, text=True)
-            ip = res.stdout.strip()
-            if ip and not ip.startswith("169.254."):
-                route_res = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
-                if route_res.returncode == 0 and "gateway:" in route_res.stdout:
+            if not ip_ready:
+                res = subprocess.run(["ipconfig", "getifaddr", device], capture_output=True, text=True)
+                ip = res.stdout.strip()
+                if ip and not ip.startswith("169.254."):
+                    route_res = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
+                    if route_res.returncode == 0 and "gateway:" in route_res.stdout:
+                        ip_ready = True
+            
+            if ip_ready:
+                # DNS check to ensure portal domain is resolvable
+                try:
+                    socket.gethostbyname("phc.prontonetworks.com")
                     return True, ip
+                except Exception:
+                    pass
         except Exception:
             pass
-        time.sleep(0.2)
+        time.sleep(0.5)
     return False, None
 
 
@@ -466,13 +476,27 @@ def run_watcher():
     - Runs continuously with near-zero CPU.
     - Suppresses and kills Captive Network Assistant on sight.
     - Triggers instant login the moment you connect to campus Wi-Fi.
+    - Backs off if login fails repeatedly, allowing the manual popup.
     """
     log_message("🚀 G-VIT Wi-Fi Active Watcher Daemon running (Zero-Popup Mode)...")
     last_login_time = 0
     was_on_campus = False
+    consecutive_failures = 0
 
     while True:
         try:
+            dev = get_wifi_device()
+            on_campus, _ = is_campus_network(dev)
+
+            if not on_campus:
+                consecutive_failures = 0
+
+            # If we've failed too many times, back off and let the popup appear normally
+            if consecutive_failures >= 2:
+                was_on_campus = on_campus
+                time.sleep(1)
+                continue
+
             # Check 1: Did CNA popup process spawn? Kill it immediately!
             if is_cna_popup_open():
                 dismiss_cna_popup()
@@ -480,19 +504,26 @@ def run_watcher():
                 if now - last_login_time > 8:
                     log_message("⚡ Popup spawn detected! Killing window and logging in...")
                     last_login_time = now
-                    do_login(force=True, verbose=True)
+                    success = do_login(force=True, verbose=True)
+                    if not success:
+                        consecutive_failures += 1
+                        log_message(f"Warning: Login failed ({consecutive_failures}/2).")
+                    else:
+                        consecutive_failures = 0
 
             # Check 2: Wi-Fi connection transition
-            dev = get_wifi_device()
-            on_campus, _ = is_campus_network(dev)
-
             if on_campus and not was_on_campus:
                 # Newly associated with campus Wi-Fi!
                 now = time.time()
                 if now - last_login_time > 8:
                     log_message("⚡ Campus Wi-Fi connection detected! Logging in...")
                     last_login_time = now
-                    do_login(force=False, verbose=True)
+                    success = do_login(force=False, verbose=True)
+                    if not success:
+                        consecutive_failures += 1
+                        log_message(f"Warning: Login failed ({consecutive_failures}/2).")
+                    else:
+                        consecutive_failures = 0
 
             was_on_campus = on_campus
 
