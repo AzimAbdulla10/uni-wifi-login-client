@@ -11,6 +11,7 @@ import urllib.request
 import urllib.parse
 import ssl
 import re
+import sys
 
 KEYCHAIN_SERVICE = "VIT-WiFi"
 PORTAL_ENDPOINTS = [
@@ -29,6 +30,13 @@ def send_notification(message):
         apple_script = f'display notification "{safe_msg}" with title "VIT Wi-Fi"'
         subprocess.run(["osascript", "-e", apple_script], capture_output=True)
     except:
+        pass
+
+def dismiss_cna_popup():
+    """Instantly terminates the macOS Captive Network Assistant popup window."""
+    try:
+        subprocess.run(["killall", "-9", "Captive Network Assistant"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
         pass
 
 def get_credentials():
@@ -74,6 +82,7 @@ def do_login():
 
     if is_internet_active():
         log_message("Internet is already active.")
+        dismiss_cna_popup()
         return True
 
     log_message(f"Authenticating as '{username}'...")
@@ -97,6 +106,7 @@ def do_login():
     
     # Aggressively attempt POST for up to 20 seconds to cover wake-from-sleep delay
     while time.time() - start_time < 20:
+        dismiss_cna_popup()  # Kill the popup if it tries to spawn during the connection wait
         for endpoint in PORTAL_ENDPOINTS:
             try:
                 req = urllib.request.Request(endpoint, data=post_data, headers=headers, method="POST")
@@ -111,6 +121,8 @@ def do_login():
         if login_ok:
             break
         time.sleep(1.0)
+    
+    dismiss_cna_popup()  # One final kill just to be sure
     
     # Verify
     if is_internet_active():
